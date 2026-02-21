@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     hedge_cooldown: float = 30.0       # seconds between hedge send attempts
 
     # ── Logging ───────────────────────────────────────────────────────────────
-    log_file: str = ""                 # empty = stdout only
+    log_file: str = "logs/execution.log"                 # empty = stdout only
     log_max_bytes: int = 10_485_760    # 10 MB per file
     log_backup_count: int = 5
 

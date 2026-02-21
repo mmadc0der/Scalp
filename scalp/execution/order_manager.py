@@ -38,7 +38,6 @@ import trio
 
 from scalp.channels import Channels
 from scalp.config import Settings
-from scalp.debug_log import debug_log
 from scalp.exchange.okx_rest import OKXRestClient
 from scalp.execution.rate_limiter import RateLimiter
 from scalp.schema import (
@@ -135,19 +134,7 @@ class OrderManager:
         if not valid:
             return None
 
-        strike, pair = min(valid, key=lambda kv: abs(kv[0] - target_strike))
-        # region agent log
-        debug_log(
-            hypothesis_id="H8",
-            location="scalp/execution/order_manager.py:_resolve_option_pair",
-            message="order_manager_resolved_option_pair",
-            data={
-                "target_expiry": target_expiry,
-                "target_strike": target_strike,
-                "resolved_strike": strike,
-            },
-        )
-        # endregion
+        _, pair = min(valid, key=lambda kv: abs(kv[0] - target_strike))
         return pair["C"], pair["P"]
 
     # ── Order placement ────────────────────────────────────────────────────────
@@ -363,22 +350,7 @@ async def order_manager_task(channels: Channels, settings: Settings) -> None:
     logger.info("OrderManager task started")
 
     async def _handle_signals() -> None:
-        signal_count = 0
         async for event in channels.signal_recv:
-            signal_count += 1
-            if signal_count <= 3 or signal_count % 20 == 0:
-                # region agent log
-                debug_log(
-                    hypothesis_id="H8",
-                    location="scalp/execution/order_manager.py:_handle_signals",
-                    message="order_manager_received_signal",
-                    data={
-                        "count": signal_count,
-                        "regime": event.regime.value,
-                        "kappa": event.kappa,
-                    },
-                )
-                # endregion
             if not event.nearest_expiry or event.atm_strike <= 0:
                 logger.warning(
                     "RegimeEvent missing ATM surface info; skipping trade order"

@@ -36,7 +36,6 @@ from trio_websocket import (
 
 from scalp.channels import Channels
 from scalp.config import Settings
-from scalp.debug_log import debug_log
 from scalp.schema import RawWSEvent
 
 logger = logging.getLogger(__name__)
@@ -44,7 +43,6 @@ logger = logging.getLogger(__name__)
 _PING_INTERVAL_S = 20.0
 _RECONNECT_BASE_S = 2.0
 _RECONNECT_MAX_S = 60.0
-_WS_DATA_COUNT: dict[tuple[str, str], int] = {}
 
 
 # ── Authentication ────────────────────────────────────────────────────────────
@@ -101,14 +99,6 @@ async def _login(ws: WebSocketConnection, settings: Settings) -> bool:
 
 async def _subscribe(ws: WebSocketConnection, args: list[dict]) -> None:
     await ws.send_message(json.dumps({"op": "subscribe", "args": args}))
-    # region agent log
-    debug_log(
-        hypothesis_id="H1",
-        location="scalp/exchange/okx_ws.py:_subscribe",
-        message="subscription_request_sent",
-        data={"args_count": len(args), "channels": [a.get("channel", "") for a in args]},
-    )
-    # endregion
 
 
 # ── Generic receive loop ──────────────────────────────────────────────────────
@@ -152,14 +142,6 @@ async def _recv_loop(
             continue
         if event == "error":
             logger.warning("%s: WS error: %s", label, msg)
-            # region agent log
-            debug_log(
-                hypothesis_id="H1",
-                location="scalp/exchange/okx_ws.py:_recv_loop",
-                message="ws_error_event",
-                data={"label": label, "code": msg.get("code"), "msg": msg.get("msg", "")[:180]},
-            )
-            # endregion
             continue
 
         arg = msg.get("arg", {})
@@ -170,31 +152,10 @@ async def _recv_loop(
             continue
 
         ev = RawWSEvent(channel=channel, arg=arg, data=data)
-        key = (label, channel)
-        n = _WS_DATA_COUNT.get(key, 0) + 1
-        _WS_DATA_COUNT[key] = n
-        if n <= 3 or n % 50 == 0:
-            data_len = len(data) if isinstance(data, list) else 1
-            # region agent log
-            debug_log(
-                hypothesis_id="H2",
-                location="scalp/exchange/okx_ws.py:_recv_loop",
-                message="ws_data_event",
-                data={"label": label, "channel": channel, "count": n, "data_len": data_len},
-            )
-            # endregion
         try:
             channels.raw_send.send_nowait(ev)
         except trio.WouldBlock:
             logger.debug("%s: raw_ch full, dropping %s event", label, channel)
-            # region agent log
-            debug_log(
-                hypothesis_id="H3",
-                location="scalp/exchange/okx_ws.py:_recv_loop",
-                message="raw_channel_backpressure_drop",
-                data={"label": label, "channel": channel, "count": n},
-            )
-            # endregion
 
 
 async def _keepalive_loop(ws: WebSocketConnection, label: str) -> None:

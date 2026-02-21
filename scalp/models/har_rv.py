@@ -32,11 +32,9 @@ import trio
 
 from scalp.channels import Channels
 from scalp.config import Settings
-from scalp.debug_log import debug_log
 from scalp.schema import Candle, RVForecast
 
 logger = logging.getLogger(__name__)
-_HAR_CANDLE_COUNT = 0
 
 # Number of intra-day observations required for a valid daily RV
 _MIN_INTRADAY = 50   # tolerate gaps; don't require a full 288 candles
@@ -184,18 +182,6 @@ async def har_rv_task(
             return last
 
         seeded = await trio.to_thread.run_sync(_bootstrap_seed, abandon_on_cancel=False)
-        # region agent log
-        debug_log(
-            hypothesis_id="H7",
-            location="scalp/models/har_rv.py:har_rv_task",
-            message="har_bootstrap_seed_applied",
-            data={
-                "bootstrap_closes": len(bootstrap_closes),
-                "daily_window": len(model._daily_rv),
-                "has_forecast": seeded is not None,
-            },
-        )
-        # endregion
         if seeded is not None:
             logger.info(
                 "HAR-RV bootstrap forecast: σ̂=%.4f  n_obs=%d",
@@ -204,38 +190,12 @@ async def har_rv_task(
             await channels.rv_forecast_send.send(seeded)
 
     async for candle in channels.candle_recv:
-        global _HAR_CANDLE_COUNT
-        _HAR_CANDLE_COUNT += 1
-        if _HAR_CANDLE_COUNT <= 3 or _HAR_CANDLE_COUNT % 100 == 0:
-            # region agent log
-            debug_log(
-                hypothesis_id="H5",
-                location="scalp/models/har_rv.py:har_rv_task",
-                message="har_received_candle",
-                data={"count": _HAR_CANDLE_COUNT, "close": candle.close},
-            )
-            # endregion
         close = candle.close
 
         forecast = await trio.to_thread.run_sync(
             lambda: model.push_candle(close),
             abandon_on_cancel=True,
         )
-        if forecast is None and (_HAR_CANDLE_COUNT <= 3 or _HAR_CANDLE_COUNT % 200 == 0):
-            # region agent log
-            debug_log(
-                hypothesis_id="H7",
-                location="scalp/models/har_rv.py:har_rv_task",
-                message="har_no_forecast_yet",
-                data={
-                    "candles_seen": _HAR_CANDLE_COUNT,
-                    "intraday_returns": len(model._intraday_returns),
-                    "daily_window": len(model._daily_rv),
-                    "daily_needed": 23,
-                    "candles_per_day": model.candles_per_day,
-                },
-            )
-            # endregion
 
         if forecast is not None:
             logger.info(
@@ -243,12 +203,4 @@ async def har_rv_task(
                 forecast.sigma_hat, forecast.n_obs,
                 np.round(forecast.beta_vector, 4),
             )
-            # region agent log
-            debug_log(
-                hypothesis_id="H5",
-                location="scalp/models/har_rv.py:har_rv_task",
-                message="har_emitted_forecast",
-                data={"sigma_hat": forecast.sigma_hat, "n_obs": forecast.n_obs},
-            )
-            # endregion
             await channels.rv_forecast_send.send(forecast)

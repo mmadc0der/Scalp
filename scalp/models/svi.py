@@ -28,7 +28,6 @@ import trio
 
 from scalp.channels import Channels
 from scalp.config import Settings
-from scalp.debug_log import debug_log
 from scalp.schema import OBSnapshot, SVIParams, VolSurface
 
 logger = logging.getLogger(__name__)
@@ -225,14 +224,6 @@ async def svi_fitter_task(channels: Channels, settings: Settings) -> None:
 
         snapshots = list(pending.values())
         pending.clear()
-        # region agent log
-        debug_log(
-            hypothesis_id="H4",
-            location="scalp/models/svi.py:svi_fitter_task",
-            message="svi_fit_cycle_start",
-            data={"snapshots_count": len(snapshots)},
-        )
-        # endregion
 
         fp = futures_price  # capture for closure
 
@@ -243,28 +234,12 @@ async def svi_fitter_task(channels: Channels, settings: Settings) -> None:
 
         if surface is None:
             logger.warning("SVIFitter: no expiries fit in this cycle")
-            # region agent log
-            debug_log(
-                hypothesis_id="H4",
-                location="scalp/models/svi.py:svi_fitter_task",
-                message="svi_fit_cycle_no_surface",
-                data={"snapshots_count": len(snapshots)},
-            )
-            # endregion
             continue
 
         logger.debug(
             "VolSurface fitted: expiries=%s  atm_iv=%.4f",
             list(surface.expiries.keys()), surface.atm_iv,
         )
-        # region agent log
-        debug_log(
-            hypothesis_id="H4",
-            location="scalp/models/svi.py:svi_fitter_task",
-            message="svi_surface_emitted",
-            data={"expiries_count": len(surface.expiries), "atm_iv": surface.atm_iv},
-        )
-        # endregion
 
         await channels.surface_signal_send.send(surface)
         await channels.surface_portfolio_send.send(surface)

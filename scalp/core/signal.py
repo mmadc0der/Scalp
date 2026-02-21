@@ -24,7 +24,6 @@ import trio
 
 from scalp.channels import Channels
 from scalp.config import Settings
-from scalp.debug_log import debug_log
 from scalp.schema import Regime, RegimeEvent, RVForecast, VolSurface
 
 logger = logging.getLogger(__name__)
@@ -94,7 +93,6 @@ async def signal_engine_task(channels: Channels, settings: Settings) -> None:
     current_regime = Regime.NEUTRAL
     last_rv: RVForecast | None = None
     last_kappa: float = 1.0
-    surface_count = 0
 
     logger.info(
         "SignalEngine task started — δ_entry=%.3f  δ_exit=%.3f",
@@ -113,21 +111,11 @@ async def signal_engine_task(channels: Channels, settings: Settings) -> None:
 
     async def _consume_surface() -> None:
         """Main loop: recompute κ and fire FSM on every surface update."""
-        nonlocal current_regime, last_kappa, surface_count
+        nonlocal current_regime, last_kappa
 
         async for surface in channels.surface_signal_recv:
-            surface_count += 1
             if last_rv is None:
                 logger.debug("SignalEngine: waiting for first RV forecast")
-                if surface_count <= 3 or surface_count % 200 == 0:
-                    # region agent log
-                    debug_log(
-                        hypothesis_id="H6",
-                        location="scalp/core/signal.py:_consume_surface",
-                        message="signal_waiting_for_rv_forecast",
-                        data={"surface_count": surface_count, "atm_iv": surface.atm_iv},
-                    )
-                    # endregion
                 continue
 
             kappa = _compute_kappa(surface, last_rv)
@@ -153,20 +141,6 @@ async def signal_engine_task(channels: Channels, settings: Settings) -> None:
                     kappa, surface.atm_iv, last_rv.sigma_hat,
                 )
                 current_regime = next_regime
-                # region agent log
-                debug_log(
-                    hypothesis_id="H8",
-                    location="scalp/core/signal.py:_consume_surface",
-                    message="signal_regime_transition",
-                    data={
-                        "from": ev.prev_regime.value,
-                        "to": ev.regime.value,
-                        "kappa": ev.kappa,
-                        "nearest_expiry": ev.nearest_expiry,
-                        "atm_strike": ev.atm_strike,
-                    },
-                )
-                # endregion
                 await channels.signal_send.send(ev)
             else:
                 logger.debug(

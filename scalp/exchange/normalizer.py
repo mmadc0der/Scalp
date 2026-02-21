@@ -40,11 +40,9 @@ import trio
 
 from scalp.channels import Channels
 from scalp.config import Settings
-from scalp.debug_log import debug_log
 from scalp.schema import Candle, FillEvent, OBSnapshot, RawWSEvent
 
 logger = logging.getLogger(__name__)
-_NORM_CH_COUNT: dict[str, int] = {}
 
 
 # ── Option instrument parser ───────────────────────────────────────────────────
@@ -300,30 +298,10 @@ async def normalizer_task(channels: Channels, settings: Settings) -> None:
 
     async for event in channels.raw_recv:
         ch = event.channel
-        n = _NORM_CH_COUNT.get(ch, 0) + 1
-        _NORM_CH_COUNT[ch] = n
-        if n <= 3 or n % 50 == 0:
-            # region agent log
-            debug_log(
-                hypothesis_id="H3",
-                location="scalp/exchange/normalizer.py:normalizer_task",
-                message="normalizer_received_raw_event",
-                data={"channel": ch, "count": n},
-            )
-            # endregion
 
         if ch == "opt-summary":
             channel_counts["opt-summary"] += 1
             snapshots = norm.process_opt_summary(event.data)
-            if snapshots:
-                # region agent log
-                debug_log(
-                    hypothesis_id="H4",
-                    location="scalp/exchange/normalizer.py:normalizer_task",
-                    message="normalizer_built_snapshots",
-                    data={"snapshots_count": len(snapshots)},
-                )
-                # endregion
             for snap in snapshots:
                 try:
                     channels.ob_snapshot_send.send_nowait(snap)
@@ -335,15 +313,6 @@ async def normalizer_task(channels: Channels, settings: Settings) -> None:
         elif ch in ("candle5m", "index-candle5m", "index-candles5m"):
             channel_counts["candle"] += 1
             parsed = DataNormalizer.process_candle(event.arg, event.data)
-            if parsed:
-                # region agent log
-                debug_log(
-                    hypothesis_id="H5",
-                    location="scalp/exchange/normalizer.py:normalizer_task",
-                    message="normalizer_parsed_candles",
-                    data={"candles_count": len(parsed), "instId": event.arg.get("instId", "")},
-                )
-                # endregion
             for candle in parsed:
                 try:
                     channels.candle_send.send_nowait(candle)
