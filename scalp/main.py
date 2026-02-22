@@ -35,7 +35,7 @@ import logging
 import signal
 import sys
 from logging.handlers import RotatingFileHandler
-from typing import Any
+from typing import Any, Callable
 
 import trio
 
@@ -83,6 +83,42 @@ def _configure_logging(settings: Settings) -> None:
 
 # ── REST bootstrap ────────────────────────────────────────────────────────────
 
+async def _retry_rest_bootstrap_call(
+    *,
+    op_name: str,
+    func: Callable[[], Any],
+    attempts: int = 4,
+    base_delay_s: float = 1.0,
+    max_delay_s: float = 8.0,
+) -> Any | None:
+    """Run a blocking REST call with bounded exponential-backoff retries."""
+    last_exc: Exception | None = None
+    for attempt in range(1, max(attempts, 1) + 1):
+        try:
+            return await trio.to_thread.run_sync(func, abandon_on_cancel=False)
+        except Exception as exc:  # network/SDK transient failures
+            last_exc = exc
+            if attempt >= attempts:
+                break
+            delay = min(base_delay_s * (2 ** (attempt - 1)), max_delay_s)
+            logger.warning(
+                "Bootstrap: %s failed (%s), retry %d/%d in %.1fs",
+                op_name,
+                exc,
+                attempt,
+                attempts,
+                delay,
+            )
+            await trio.sleep(delay)
+
+    logger.error(
+        "Bootstrap: %s failed after %d attempt(s): %s",
+        op_name,
+        max(attempts, 1),
+        last_exc,
+    )
+    return None
+
 async def _bootstrap(settings: Settings) -> tuple[list[float], list[dict[str, Any]]]:
     """
     Pre-flight REST calls:
@@ -100,7 +136,10 @@ async def _bootstrap(settings: Settings) -> tuple[list[float], list[dict[str, An
     logger.info("Bootstrap: connecting to OKX (simulated=%s)", settings.okx_simulated)
 
     # Credentials check
-    balances = await trio.to_thread.run_sync(rest.get_balance, abandon_on_cancel=False)
+    balances = await _retry_rest_bootstrap_call(
+        op_name="get account balance",
+        func=rest.get_balance,
+    ) or []
     if balances:
         logger.info("Bootstrap: account balance OK (%d entries)", len(balances))
     else:
@@ -114,12 +153,18 @@ async def _bootstrap(settings: Settings) -> tuple[list[float], list[dict[str, An
     max_pages = 40
 
     for _ in range(max_pages):
-        page = await trio.to_thread.run_sync(
-            lambda b=before: rest.get_historical_candles(
-                settings.index_inst_id, bar="5m", limit=300, before=b
+        page = await _retry_rest_bootstrap_call(
+            op_name=f"get historical candles before={before or 'latest'}",
+            func=lambda b=before: rest.get_historical_candles(
+                settings.index_inst_id,
+                bar="5m",
+                limit=300,
+                before=b,
             ),
-            abandon_on_cancel=False,
         )
+        if page is None:
+            logger.warning("Bootstrap: stopping historical pagination after repeated failures")
+            break
         if not page:
             break
 
@@ -153,7 +198,10 @@ async def _bootstrap(settings: Settings) -> tuple[list[float], list[dict[str, An
         logger.warning("Bootstrap: no historical candle data returned")
 
     # Fetch current positions so PortfolioTracker can seed itself
-    positions = await trio.to_thread.run_sync(rest.get_positions, abandon_on_cancel=False)
+    positions = await _retry_rest_bootstrap_call(
+        op_name="get open positions",
+        func=rest.get_positions,
+    ) or []
     if positions:
         logger.info("Bootstrap: %d open position(s) found", len(positions))
         for pos in positions:
