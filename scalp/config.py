@@ -30,8 +30,14 @@ class Settings(BaseSettings):
     index_inst_id: str = "BTC-USD"          # index for 5-min candles (HAR-RV)
 
     # ── Signal parameters (hysteresis thresholds) ─────────────────────────────
-    delta_entry: float = 0.05   # κ must exceed 1 ± δ_entry to enter a regime
-    delta_exit: float = 0.02    # κ must fall within 1 ± δ_exit to exit to NEUTRAL
+    delta_entry: float = 0.12   # κ must exceed 1 ± δ_entry to enter a regime
+    delta_exit: float = 0.04    # κ must fall within 1 ± δ_exit to exit to NEUTRAL
+    signal_persist_ticks: int = 3        # require N consecutive transition votes
+    signal_min_hold_seconds: float = 600.0  # minimum time between regime changes
+    signal_rv_floor: float = 0.08        # reject/clamp unrealistically low RV
+    signal_rv_cap: float = 3.0           # reject/clamp unrealistically high RV
+    signal_kappa_min: float = 0.5        # clamp κ to suppress numerical spikes
+    signal_kappa_max: float = 2.0
 
     # ── Whalley-Wilmott hedge bandwidth ───────────────────────────────────────
     phi: float = 0.0005         # proportional transaction cost (fees + slippage)

@@ -250,25 +250,30 @@ async def portfolio_tracker_task(
     ignore_historical_fills = seeded_count > 0
     fill_cutoff_ts = time.time()
 
+    def _publish_state(state: PortfolioState) -> None:
+        try:
+            channels.portfolio_state_send.send_nowait(state)
+        except trio.WouldBlock:
+            pass
+        try:
+            channels.portfolio_state_order_send.send_nowait(state)
+        except trio.WouldBlock:
+            pass
+
+    if seeded_count > 0:
+        _publish_state(tracker.snapshot())
+
     async def _handle_fills() -> None:
         async for fill in channels.fill_recv:
             if ignore_historical_fills and fill.timestamp < fill_cutoff_ts:
                 continue
             tracker.apply_fill(fill)
-            state = tracker.snapshot()
-            try:
-                channels.portfolio_state_send.send_nowait(state)
-            except trio.WouldBlock:
-                pass  # HedgeEngine will catch next push
+            _publish_state(tracker.snapshot())
 
     async def _handle_surface() -> None:
         async for surface in channels.surface_portfolio_recv:
             tracker.reprice(surface)
-            state = tracker.snapshot()
-            try:
-                channels.portfolio_state_send.send_nowait(state)
-            except trio.WouldBlock:
-                pass
+            _publish_state(tracker.snapshot())
 
     async with trio.open_nursery() as nursery:
         nursery.start_soon(_handle_fills)

@@ -73,6 +73,10 @@ class Channels:
     portfolio_state_send: trio.MemorySendChannel[PortfolioState]
     portfolio_state_recv: trio.MemoryReceiveChannel[PortfolioState]
 
+    # PortfolioTracker → OrderManager (for position-aware regime execution)
+    portfolio_state_order_send: trio.MemorySendChannel[PortfolioState]
+    portfolio_state_order_recv: trio.MemoryReceiveChannel[PortfolioState]
+
 
 def create_channels(settings: Settings) -> Channels:
     n = settings.channel_maxsize
@@ -87,6 +91,7 @@ def create_channels(settings: Settings) -> Channels:
     sig_s, sig_r = trio.open_memory_channel[RegimeEvent](16)
     ord_s, ord_r = trio.open_memory_channel[Order](n)
     ps_s, ps_r = trio.open_memory_channel[PortfolioState](8)
+    ps_ord_s, ps_ord_r = trio.open_memory_channel[PortfolioState](8)
 
     return Channels(
         raw_send=raw_s,
@@ -109,4 +114,6 @@ def create_channels(settings: Settings) -> Channels:
         order_recv=ord_r,
         portfolio_state_send=ps_s,
         portfolio_state_recv=ps_r,
+        portfolio_state_order_send=ps_ord_s,
+        portfolio_state_order_recv=ps_ord_r,
     )

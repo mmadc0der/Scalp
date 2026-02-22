@@ -46,6 +46,7 @@ from scalp.schema import (
     OrderSide,
     OrderStatus,
     OrderType,
+    PortfolioState,
     Regime,
     RegimeEvent,
 )
@@ -95,6 +96,36 @@ class OrderManager:
         # lightweight option instrument cache: uly -> list[inst dict]
         self._opt_cache: dict[str, list[dict[str, Any]]] = {}
         self._futures_inst_cache: dict[str, dict[str, Any]] = {}
+        self._portfolio_legs: dict[str, float] = {}
+
+    def update_portfolio_state(self, state: PortfolioState) -> None:
+        self._portfolio_legs = {
+            inst: leg.quantity for inst, leg in state.legs.items() if abs(leg.quantity) > 1e-9
+        }
+
+    def _option_legs(self) -> dict[str, float]:
+        return {
+            inst: qty
+            for inst, qty in self._portfolio_legs.items()
+            if inst.endswith("-C") or inst.endswith("-P")
+        }
+
+    async def _close_option_inventory(self) -> None:
+        option_legs = self._option_legs()
+        if not option_legs:
+            logger.info("Regime → NEUTRAL: no option inventory to close")
+            return
+        logger.info("Regime → NEUTRAL: closing %d option leg(s)", len(option_legs))
+        for inst_id, qty in option_legs.items():
+            close_side = OrderSide.SELL if qty > 0 else OrderSide.BUY
+            order = Order(
+                instrument=inst_id,
+                side=close_side,
+                quantity=abs(qty),
+                order_type=OrderType.TRADE,
+                client_order_id=f"cls{uuid.uuid4().hex[:16]}",
+            )
+            await self.place(order)
 
     async def _resolve_option_pair(
         self,
@@ -301,7 +332,18 @@ class OrderManager:
         regime = event.regime
 
         if regime == Regime.NEUTRAL:
-            logger.info("Regime → NEUTRAL (κ=%.4f); no new trades", event.kappa)
+            logger.info("Regime → NEUTRAL (κ=%.4f)", event.kappa)
+            await self._close_option_inventory()
+            return
+
+        open_option_legs = self._option_legs()
+        if open_option_legs:
+            logger.warning(
+                "Regime → %s (κ=%.4f) skipped: existing option inventory still open (%d legs)",
+                regime.value,
+                event.kappa,
+                len(open_option_legs),
+            )
             return
 
         side = OrderSide.BUY if regime == Regime.LONG_VOL else OrderSide.SELL
@@ -364,6 +406,11 @@ async def order_manager_task(channels: Channels, settings: Settings) -> None:
         async for order in channels.order_recv:
             await manager.place(order)
 
+    async def _handle_portfolio_state() -> None:
+        async for state in channels.portfolio_state_order_recv:
+            manager.update_portfolio_state(state)
+
     async with trio.open_nursery() as nursery:
         nursery.start_soon(_handle_signals)
         nursery.start_soon(_handle_hedge_orders)
+        nursery.start_soon(_handle_portfolio_state)

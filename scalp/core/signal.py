@@ -93,6 +93,9 @@ async def signal_engine_task(channels: Channels, settings: Settings) -> None:
     current_regime = Regime.NEUTRAL
     last_rv: RVForecast | None = None
     last_kappa: float = 1.0
+    last_transition_time = float("-inf")
+    pending_regime: Regime | None = None
+    pending_votes = 0
 
     logger.info(
         "SignalEngine task started — δ_entry=%.3f  δ_exit=%.3f",
@@ -111,14 +114,25 @@ async def signal_engine_task(channels: Channels, settings: Settings) -> None:
 
     async def _consume_surface() -> None:
         """Main loop: recompute κ and fire FSM on every surface update."""
-        nonlocal current_regime, last_kappa
+        nonlocal current_regime, last_kappa, last_transition_time, pending_regime, pending_votes
 
         async for surface in channels.surface_signal_recv:
             if last_rv is None:
                 logger.debug("SignalEngine: waiting for first RV forecast")
                 continue
 
-            kappa = _compute_kappa(surface, last_rv)
+            rv_safe = min(max(last_rv.sigma_hat, settings.signal_rv_floor), settings.signal_rv_cap)
+            if not math.isclose(rv_safe, last_rv.sigma_hat):
+                logger.warning(
+                    "RV forecast clipped: raw=%.4f clipped=%.4f (floor=%.4f cap=%.4f)",
+                    last_rv.sigma_hat,
+                    rv_safe,
+                    settings.signal_rv_floor,
+                    settings.signal_rv_cap,
+                )
+
+            raw_kappa = surface.atm_iv / rv_safe if rv_safe > 0 else 1.0
+            kappa = min(max(raw_kappa, settings.signal_kappa_min), settings.signal_kappa_max)
             last_kappa = kappa
 
             next_regime = _transition(
@@ -127,6 +141,19 @@ async def signal_engine_task(channels: Channels, settings: Settings) -> None:
             )
 
             if next_regime != current_regime:
+                if pending_regime == next_regime:
+                    pending_votes += 1
+                else:
+                    pending_regime = next_regime
+                    pending_votes = 1
+
+                if pending_votes < settings.signal_persist_ticks:
+                    continue
+
+                now = trio.current_time()
+                if now - last_transition_time < settings.signal_min_hold_seconds:
+                    continue
+
                 nearest_exp, atm_strike = _nearest_expiry_and_atm(surface)
                 ev = RegimeEvent(
                     regime=next_regime,
@@ -138,11 +165,16 @@ async def signal_engine_task(channels: Channels, settings: Settings) -> None:
                 logger.info(
                     "Regime transition: %s → %s  (κ=%.4f  atm_iv=%.4f  rv̂=%.4f)",
                     current_regime.value, next_regime.value,
-                    kappa, surface.atm_iv, last_rv.sigma_hat,
+                    kappa, surface.atm_iv, rv_safe,
                 )
                 current_regime = next_regime
+                last_transition_time = now
+                pending_regime = None
+                pending_votes = 0
                 await channels.signal_send.send(ev)
             else:
+                pending_regime = None
+                pending_votes = 0
                 logger.debug(
                     "Regime held: %s  κ=%.4f  atm_iv=%.4f",
                     current_regime.value, kappa, surface.atm_iv,
