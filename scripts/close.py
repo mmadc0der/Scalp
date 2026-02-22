@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
+import uuid
 from typing import Any
 
 from scalp.config import Settings
@@ -45,11 +47,30 @@ def _build_close_order(pos: dict[str, Any]) -> dict[str, str] | None:
         "side": side,
         "ordType": "market",
         "sz": f"{qty:.8f}",
-        "reduceOnly": "true",
     }
+    if "-C" not in inst_id and "-P" not in inst_id:
+        order["reduceOnly"] = "true"
     if pos_side in {"long", "short"}:
         order["posSide"] = pos_side
     return order
+
+
+def _apply_option_price(rest: OKXRestClient, order: dict[str, str]) -> bool:
+    """Options reject market orders; convert to limit with top-of-book price."""
+    inst_id = order.get("instId", "")
+    if "-C" not in inst_id and "-P" not in inst_id:
+        return True
+
+    ticker = rest.get_ticker(inst_id) or {}
+    if order["side"] == "buy":
+        px = str(ticker.get("askPx") or ticker.get("last") or "")
+    else:
+        px = str(ticker.get("bidPx") or ticker.get("last") or "")
+    if not px:
+        return False
+    order["ordType"] = "limit"
+    order["px"] = px
+    return True
 
 
 def main() -> int:
@@ -65,6 +86,18 @@ def main() -> int:
         "--dry-run",
         action="store_true",
         help="Show close orders without sending them.",
+    )
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=3,
+        help="Retries per order on network errors (default: 3).",
+    )
+    parser.add_argument(
+        "--retry-delay",
+        type=float,
+        default=1.5,
+        help="Base retry delay in seconds (default: 1.5).",
     )
     args = parser.parse_args()
 
@@ -86,23 +119,55 @@ def main() -> int:
         return 0
 
     for idx, order in enumerate(close_orders, start=1):
+        order["clOrdId"] = f"close{uuid.uuid4().hex[:24]}"
+        if not _apply_option_price(rest, order):
+            print(f"[{idx}/{len(close_orders)}] FAILED: no ticker price for {order['instId']}", file=sys.stderr)
+            continue
+
         inst_id = order["instId"]
         side = order["side"]
         size = order["sz"]
         td_mode = order["tdMode"]
         pos_side = order.get("posSide", "net")
-        print(f"[{idx}/{len(close_orders)}] {side} {size} {inst_id} tdMode={td_mode} posSide={pos_side}")
+        ord_type = order["ordType"]
+        px = order.get("px", "")
+        px_part = f" px={px}" if px else ""
+        print(
+            f"[{idx}/{len(close_orders)}] {side} {size} {inst_id} "
+            f"tdMode={td_mode} posSide={pos_side} ordType={ord_type}{px_part}"
+        )
         if args.dry_run:
             continue
 
-        # Use raw trade endpoint to pass reduceOnly/posSide explicitly.
-        result = rest._trade.place_order(**order)  # noqa: SLF001
-        data = (result or {}).get("data") or [{}]
-        item = data[0] if data else {}
-        if item.get("sCode") != "0":
-            print(f"  FAILED: {item.get('sMsg')}", file=sys.stderr)
-        else:
-            print(f"  OK: ordId={item.get('ordId', '')}")
+        ok = False
+        for attempt in range(1, max(args.max_retries, 1) + 1):
+            try:
+                # Use raw trade endpoint to pass reduceOnly/posSide explicitly.
+                result = rest._trade.place_order(**order)  # noqa: SLF001
+            except Exception as exc:  # network/timeouts from httpx/httpcore
+                if attempt >= args.max_retries:
+                    print(f"  FAILED: request exception after {attempt} attempts: {exc}", file=sys.stderr)
+                    break
+                sleep_s = args.retry_delay * (2 ** (attempt - 1))
+                print(f"  retry {attempt}/{args.max_retries} after exception: {exc}", file=sys.stderr)
+                time.sleep(sleep_s)
+                continue
+
+            data = (result or {}).get("data") or [{}]
+            item = data[0] if data else {}
+            if item.get("sCode") == "0":
+                print(f"  OK: ordId={item.get('ordId', '')}")
+                ok = True
+                break
+            msg = item.get("sMsg") or "unknown error"
+            if attempt >= args.max_retries:
+                print(f"  FAILED: {msg}", file=sys.stderr)
+                break
+            sleep_s = args.retry_delay * (2 ** (attempt - 1))
+            print(f"  retry {attempt}/{args.max_retries} after exchange reject: {msg}", file=sys.stderr)
+            time.sleep(sleep_s)
+        if not ok:
+            continue
 
     return 0
 
